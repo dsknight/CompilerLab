@@ -1,0 +1,8 @@
+*.o
+*~
+*.swp
+test.c
+tt
+tt.ir
+*test*
+tags
