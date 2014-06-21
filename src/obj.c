@@ -8,17 +8,19 @@
 #include "../header/ir.h"
 #include "../header/obj.h"
 
+#define min(a,b) (((a) < (b)) ? (a) : (b))
+
 int reg_state[32];
 int codeLen;
 int *basic_block;
-int curr_offset = 0;
+int curr_offset;
 int curr_param_cnt = 0;
 int curr_arg_cnt = 0;
 my_descriptor *var_descriptor;
 my_descriptor *tmp_descriptor;
 
 //init my_descriptor; partition of basic block; init code_index in InterCode
-static void code_preprocess(){
+static void preprocess(){
     //init my_descriptor
     var_descriptor = (my_descriptor *)malloc(sizeof(my_descriptor)*(var_cnt+1));
     memset(var_descriptor,0,sizeof(my_descriptor)*(var_cnt+1));
@@ -41,12 +43,14 @@ static void code_preprocess(){
     list_foreach(ptr,&codeHead){
         InterCode code = list_entry(ptr,struct InterCode_,list);
         if( code->code_index == 0 || code->kind == GOTO || code->kind == COND_GOTO || 
-            code->kind == DEF_LABEL || code->kind == DEF_FUN || code->kind == RET)
+            code->kind == DEF_LABEL || code->kind == DEF_FUN || code->kind == RET || code->kind == ASSIGN_CALL)
             basic_block[code->code_index] = 1;
     }
 }
 
 void update_next_appear(Operand op, int code_index){
+    if(op == NULL)
+        return;
     int var_update_flag[var_cnt+1];
     for(int i = 0; i < var_cnt+1; i++){
         var_descriptor[i].next_appear = codeLen;
@@ -56,8 +60,11 @@ void update_next_appear(Operand op, int code_index){
     list_foreach(ptr,&codeHead){
         InterCode code = list_entry(ptr,struct InterCode_,list);
         if(code->code_index >= code_index){
-            if(code->kind > 7 && code->kind <= 13){
+            if(code->kind <= 7){
+            }
+            else if(code->kind > 7 && code->kind <= 13){
                 Operand op2 = code->u.two_op.op2;
+                if(op2 == NULL)
                 if(var_update_flag[op2->u.var_no] == 0 && op2->kind == VARIABLE){
                     var_descriptor[op2->u.var_no].next_appear = code->code_index;
                     var_update_flag[op2->u.var_no] = 1;
@@ -102,7 +109,9 @@ void update_next_appear(Operand op, int code_index){
     list_foreach(ptr,&codeHead){
         InterCode code = list_entry(ptr,struct InterCode_,list);
         if(code->code_index >= code_index){
-            if(code->kind > 7 && code->kind <= 13){
+            if(code->kind <= 7){
+            }
+            else if(code->kind > 7 && code->kind <= 13){
                 Operand op2 = code->u.two_op.op2;
                 if(tmp_update_flag[op2->u.var_no] == 0 && op2->kind == TEMP){
                     tmp_descriptor[op2->u.var_no].next_appear = code->code_index;
@@ -165,13 +174,15 @@ static int allocate(Operand op, int code_index){
     //if there is no free reg
     update_next_appear(op,code_index);
     int var_farthest_appear = 0;
-    for(int i = 0; i < var_cnt+1; i++){
-        if(var_descriptor[i].next_appear > var_descriptor[var_farthest_appear].next_appear)
+    var_descriptor[0].next_appear = 0;
+    for(int i = 1; i < var_cnt+1; i++){
+        if(var_descriptor[i].next_appear > var_descriptor[var_farthest_appear].next_appear && var_descriptor[i].reg_index != 0)
             var_farthest_appear = i;
     }
     int tmp_farthest_appear = 0;
-    for(int i = 0; i < tmp_cnt+1; i++){
-        if(tmp_descriptor[i].next_appear > tmp_descriptor[tmp_farthest_appear].next_appear)
+    tmp_descriptor[0].next_appear = 0;
+    for(int i = 1; i < tmp_cnt+1; i++){
+        if(tmp_descriptor[i].next_appear > tmp_descriptor[tmp_farthest_appear].next_appear && tmp_descriptor[i].reg_index != 0)
             tmp_farthest_appear = i;
     }
     int result;
@@ -179,34 +190,33 @@ static int allocate(Operand op, int code_index){
         result = var_descriptor[var_farthest_appear].reg_index;
     else
         result = tmp_descriptor[tmp_farthest_appear].reg_index;
+
+    if(result == 0){
+        int test = result + 1;
+    }
    
     my_descriptor *dsp = get_descriptor(op);
     printf("\tsw $%d, %d($sp)\n",result,dsp->offset);
 
-    //change the varible's reg_index, because other var/tmp will lw to it 
-    int flag = 1;
-    for(int i = 0; i < var_cnt+1; i++){
+    //reset the varible's reg_index, because other var/tmp will use it 
+    for(int i = 1; i < var_cnt+1; i++){
         if(var_descriptor[i].reg_index == result){
             var_descriptor[i].reg_index = 0;
-            flag = 0;
-            break;
         }
     }
-    if(flag){
-        for(int i = 0; i < tmp_cnt+1; i++){
-            if(tmp_descriptor[i].reg_index == result){
-                tmp_descriptor[i].reg_index = 0;
-                break;
-            }
+    for(int i = 1; i < tmp_cnt+1; i++){
+        if(tmp_descriptor[i].reg_index == result){
+            tmp_descriptor[i].reg_index = 0;
         }
     }
+
 
     return result;
 }
 
 //return a register index for op
 static int ensure(Operand op,int code_index,int is_dst){
-    if(op->kind != VARIABLE && op->kind != TEMP)
+    if(op == NULL || (op->kind != VARIABLE && op->kind != TEMP))
         return 0;
     if(op->kind == VARIABLE){
         int reg_index = var_descriptor[op->u.var_no].reg_index;
@@ -220,11 +230,15 @@ static int ensure(Operand op,int code_index,int is_dst){
     }
     //if the op is not in reg
     int result = allocate(op,code_index);
+    if(!(result >= 8 && result < 24))
+        printf("*** %d ***\n",result);
     assert(result >= 8 && result < 24);
     my_descriptor *dsp = get_descriptor(op);
-    dsp->reg_index = result;
-    if(!is_dst)
+    if(!is_dst){
         printf("\tlw $%d, %d($sp)\n",result,dsp->offset);
+    }
+    dsp->reg_index = result;
+    reg_state[result] = 1;
     return result;
 }
 
@@ -253,24 +267,75 @@ void preprint(){
         \n");
 }
 
+//allocate space for var/tmp
+static inline void allocate_space(Operand op){
+    if(op == NULL )
+        return;
+    if(op->kind == VARIABLE || op->kind == TEMP){
+        my_descriptor *dsp = get_descriptor(op);
+        if(dsp->offset == 0){
+            curr_offset -= 4;
+            dsp->offset = curr_offset;
+        }
+    }
+}
+
 //generate object code
 void generate_objCode(){
-    code_preprocess();
+    char code_for_move_arg[1000] = "";
+    preprocess();
     preprint();
     ListHead *ptr;
     list_foreach(ptr,&codeHead){
         InterCode code = list_entry(ptr,struct InterCode_,list);
-        /*if(basic_block[code->code_index] == 1){//at the begining of a basic block
-            for(int i = 8; i < 24; i++ )
+        if(basic_block[code->code_index] == 1){//at the begining of a basic block
+            for(int i = 8; i < 24; i++ ){
                 reg_state[i] = 0;
-        }*/
+            }
+            //sw the varible's whose value is in register 
+            for(int i = 0; i < var_cnt+1; i++){
+                int reg_index = var_descriptor[i].reg_index;
+                if(reg_index >= 8  && reg_index <= 24){
+                    printf("\tsw $%d, %d($sp)\n",reg_index,var_descriptor[i].offset);
+                    var_descriptor[i].reg_index = 0;
+                }
+            }
+            for(int i = 0; i < tmp_cnt+1; i++){
+                int reg_index = tmp_descriptor[i].reg_index;
+                if(reg_index >= 8  && reg_index <= 24){
+                    printf("\tsw $%d, %d($sp)\n",reg_index,tmp_descriptor[i].offset);
+                    tmp_descriptor[i].reg_index = 0;
+                }
+            }
+
+        }
         if(code->kind <= 7){
             Operand op1 = code->u.one_op;
             if(!op1)
                 continue;
+            //if it's a new variable, allocate space
+            allocate_space(op1);
             switch(code->kind){    
                 case 0 : printf("label%d:\n",op1->u.value);break;//LABEL
-                case 1 : printf("%s:\n",op1->u.func);break;//FUNCTION
+                case 1 : {//FUNCTION
+                             int param_cnt = 0;
+                             ListHead *ptr_ = ptr->next;
+                             while(1){
+                                 InterCode code_ = list_entry(ptr_,struct InterCode_,list);
+                                 if(code_->kind == PARAM)
+                                     param_cnt++;
+                                 else
+                                     break;
+                                 ptr_ = code_->list.next;
+                             }
+                             int arg_space = ((param_cnt > 4) ? (param_cnt - 4) : 0) * 4;
+                             int reg_space = ((param_cnt > 4) ? 4 : param_cnt)*4 + 4  ;
+                             curr_offset = STACK_SIZE - (arg_space + reg_space);//store argument(>4) and $ra
+
+                             printf("%s:\n",op1->u.func);
+                             curr_param_cnt = 0;
+                             break;
+                         }
                 case 2 : printf("\tj label%d\n",op1->u.value);break;//GOTO
                 case 3 : {//RETURN
                              if(op1->kind == CONSTANT)
@@ -284,41 +349,94 @@ void generate_objCode(){
                              break;
                          }
                 case 4 : {//ARG
-                             int reg_index = ensure(op1,code->code_index,0);
-                             if(curr_arg_cnt == 0){
-                                 printf("\tmove $a0, $%d\n",reg_index);
+                             while(code->kind == ARG){
+                                 ptr = ptr->next;
+                                 code = list_entry(ptr,struct InterCode_,list);
                              }
-                             else if(curr_arg_cnt == 1){
-                                 printf("\tmove $a1, $%d\n",reg_index);
+                             ptr = ptr->prev;
+                             ListHead *ptr_ = ptr;
+                             code = list_entry(ptr_,struct InterCode_,list);
+                             while(code->kind == ARG){
+                                Operand op1 = code->u.one_op;
+                                int reg_index = ensure(op1,code->code_index,0);
+                                if(curr_arg_cnt == 0){
+                                    if(op1->kind == CONSTANT)
+                                        sprintf(code_for_move_arg,"%s\tli $a0, %d\n",code_for_move_arg,op1->u.value);
+                                    else if(op1->kind == ADDR){
+                                        sprintf(code_for_move_arg,"%s\tla $a0, %d($sp)\n",
+                                                code_for_move_arg,var_descriptor[op1->u.value].offset + STACK_SIZE);
+                                    }
+                                    else
+                                        sprintf(code_for_move_arg,"%s\tmove $a0, $%d\n",code_for_move_arg,reg_index);
+                                }
+                                else if(curr_arg_cnt == 1){
+                                    if(op1->kind == CONSTANT)
+                                        sprintf(code_for_move_arg,"%s\tli $a1, %d\n",code_for_move_arg,op1->u.value);
+                                    else if(op1->kind == ADDR){
+                                        sprintf(code_for_move_arg,"%s\tla $a1, %d($sp)\n",
+                                                code_for_move_arg,var_descriptor[op1->u.value].offset + STACK_SIZE);
+                                    }
+                                    else
+                                        sprintf(code_for_move_arg,"%s\tmove $a1, $%d\n",code_for_move_arg,reg_index);
+                                }
+                                else if(curr_arg_cnt == 2){
+                                    if(op1->kind == CONSTANT)
+                                        sprintf(code_for_move_arg,"%s\tli $a2, %d\n",code_for_move_arg,op1->u.value);
+                                    else if(op1->kind == ADDR){
+                                        sprintf(code_for_move_arg,"%s\tla $a2, %d($sp)\n",
+                                                code_for_move_arg,var_descriptor[op1->u.value].offset + STACK_SIZE);
+                                    }
+                                    else
+                                        sprintf(code_for_move_arg,"%s\tmove $a2, $%d\n",code_for_move_arg,reg_index);
+                                }
+                                else if(curr_arg_cnt == 3){
+                                    if(op1->kind == CONSTANT)
+                                        sprintf(code_for_move_arg,"%s\tli $a3, %d\n",code_for_move_arg,op1->u.value);
+                                    else if(op1->kind == ADDR){
+                                        sprintf(code_for_move_arg,"%s\tla $a3, %d($sp)\n",
+                                                code_for_move_arg,var_descriptor[op1->u.value].offset + STACK_SIZE);
+                                    }
+                                    else
+                                        sprintf(code_for_move_arg,"%s\tmove $a3, $%d\n",code_for_move_arg,reg_index);
+                                }
+                                else{
+                                    int offset = STACK_SIZE - 4 * (curr_arg_cnt - 4) - 4;
+                                    if(op1->kind == CONSTANT)
+                                        sprintf(code_for_move_arg,"%s\tli $25, %d\n\tsw $25, %d($sp)\n",
+                                                code_for_move_arg,op1->u.value,offset);
+                                    else if(op1->kind == ADDR){
+                                        sprintf(code_for_move_arg,"%s\tla $26, %d($sp)\n",
+                                                code_for_move_arg,var_descriptor[op1->u.value].offset);
+                                        sprintf(code_for_move_arg,"%s\tsw $26, %d($sp)\n",code_for_move_arg,offset + STACK_SIZE);
+                                    }
+                                    else
+                                    sprintf(code_for_move_arg,"%s\tsw $%d, %d($sp)\n",code_for_move_arg,reg_index,offset);
+                                }
+                                curr_arg_cnt ++;
+                                ptr_ = ptr_->prev;
+                                code = list_entry(ptr_,struct InterCode_,list);
                              }
-                             else if(curr_arg_cnt == 2){
-                                 printf("\tmove $a2, $%d\n",reg_index);
-                             }
-                             else if(curr_arg_cnt == 3){
-                                 printf("\tmove $a3, $%d\n",reg_index);
-                             }
-                             else{
-                                 int offset = STACK_SIZE - 4 * (curr_arg_cnt - 4);
-                                 printf("\tsw $%d, %d($sp)\n",reg_index,offset);
-                             }
-                             curr_arg_cnt ++;
                              break;
                          }
                 case 5 : {//PARAM
                              if(curr_param_cnt == 0){
                                  var_descriptor[op1->u.var_no].reg_index = 4;
+                                 curr_offset -= 4;
                              }
                              else if(curr_param_cnt == 1){
                                  var_descriptor[op1->u.var_no].reg_index = 5;
+                                 curr_offset -= 4;
                              }
                              else if(curr_param_cnt == 2){
                                  var_descriptor[op1->u.var_no].reg_index = 6;
+                                 curr_offset -= 4;
                              }
                              else if(curr_param_cnt == 3){
                                  var_descriptor[op1->u.var_no].reg_index = 7;
+                                 curr_offset -= 4;
                              }
                              else{
-                                 var_descriptor[op1->u.var_no].offset = STACK_SIZE - 4 * (curr_param_cnt - 4);
+                                 var_descriptor[op1->u.var_no].offset = STACK_SIZE - 4 * (curr_param_cnt - 4) - 4;
                              }
                              curr_param_cnt ++;
                              break;
@@ -336,12 +454,21 @@ void generate_objCode(){
                          }
                 case 7 : {//WRITE
                              int reg_index = ensure(op1,code->code_index,0);
+                             int offset = min(curr_param_cnt,4)*4;
+                             printf("\taddi $sp, $sp, -%d\n",4+min(curr_param_cnt,4)*4);
+                             printf("\tsw $ra, %d($sp)\n",offset);
+                             for(int i = 0; i < min(curr_param_cnt,4); i++)
+                                 printf("\tsw $a%d, %d($sp)\n",i,offset-(4*i)-4);
+                             if(op1->kind == CONSTANT){
+                                 printf("\tli $25, %d\n",op1->u.value);
+                                 reg_index = 25;
+                             }
                              printf("\tmove $a0, $%d\n",reg_index);
-                             printf("\taddi $sp, $sp, -4\n");
-                             printf("\tsw $ra, 0($sp)\n");
                              printf("\tjal write\n");
-                             printf("\tlw $ra, 0($sp)\n");
-                             printf("\taddi $sp, $sp, 4\n");
+                             printf("\tlw $ra, %d($sp)\n",offset);
+                             for(int i = min(curr_param_cnt,4)-1; i >= 0; i--)
+                                printf("\tlw $a%d, %d($sp)\n",i,offset-(4*i)-4);
+                             printf("\taddi $sp, $sp, %d\n",4+min(curr_param_cnt,4)*4);
                              break;
                          }
             }
@@ -351,8 +478,10 @@ void generate_objCode(){
             Operand op2 = code->u.two_op.op2;
             if(code->kind != 13 && (!op1 || !op2))
                 continue;
-            int reg_index1 = ensure(op1,code->code_index,1);
+            allocate_space(op1);
+            allocate_space(op2);
             int reg_index2 = ensure(op2,code->code_index,0);
+            int reg_index1 = ensure(op1,code->code_index,1);
             switch(code->kind){
                 case 8 : {//ASSIGN
                              if(op2->kind != CONSTANT){
@@ -373,19 +502,47 @@ void generate_objCode(){
                              break;
                          }
                 case 11: {//MEM_ASSIGN
-                             printf("\tsw $%d, 0($%d)\n",reg_index2,reg_index1);
+                             if(op2->kind == CONSTANT){
+                                 printf("\tli $25, %d\n",op2->u.value);
+                                 printf("\tsw $25, 0($%d)\n",reg_index1);
+                             }
+                             else
+                                 printf("\tsw $%d, 0($%d)\n",reg_index2,reg_index1);
                              break;
                          }
                 case 12: {//DEC
+                             int size = op2->u.value;
+                             curr_offset -= op2->u.value;
+                             my_descriptor *dsp = get_descriptor(op1);
+                             dsp->offset = curr_offset;
+                             dsp->reg_index = 0;
                              break;
                          }
                 case 13: {//CALL
-                             if(op1){
+                             assert(op2->kind == FUNCTION);
+                             int arg_space_caller = (curr_param_cnt > 4) ? (curr_param_cnt - 4) : 0;
+                             int arg_space_callee = (curr_arg_cnt > 4) ? (curr_arg_cnt - 4) : 0;
+                             int offset = STACK_SIZE - (4 * arg_space_caller + 4);//space for argument(>4) and $ra
+                             int offset_ = STACK_SIZE - (4 * arg_space_callee + 4);//space for argument(>4) and $ra
+                             for(int i = 0; i < min(curr_param_cnt,4); i++)
+                                 printf("\tsw $a%d, %d($sp)\n",i,offset-(4*i)-4);
 
+                             printf("\taddi $sp, $sp, %d\n",-STACK_SIZE);
+                             printf("\tsw $ra, %d($sp)\n",offset_);
+                             printf("%s",code_for_move_arg);
+                             memset(code_for_move_arg,0,100);
+                             printf("\tjal %s\n",op2->u.func);
+                             printf("\tlw $ra, %d($sp)\n",offset_);
+                             printf("\taddi $sp, $sp, %d\n",STACK_SIZE);
+                             for(int i = min(curr_param_cnt,4)-1; i >= 0; i--)
+                                printf("\tlw $a%d, %d($sp)\n",i,offset-(4*i)-4);
+                             if(op1){
+                                 printf("\tmove $%d, $v0\n",reg_index1);
                              }
                              else{
 
                              }
+                             curr_arg_cnt = 0;
                              break;
                          }
             }
@@ -396,20 +553,44 @@ void generate_objCode(){
             Operand op3 = code->u.if_goto.op3;
             if(!op1 || !op2 || !op3)
                 continue;
-            int reg_index1 = ensure(op1,code->code_index,1);
+            allocate_space(op1);
+            allocate_space(op2);
+            allocate_space(op3);
             int reg_index2 = ensure(op2,code->code_index,0);
             int reg_index3 = ensure(op3,code->code_index,0);
+            int reg_index1 = ensure(op1,code->code_index,1);
 
             switch(code->kind){
                 case 14: {
                              assert(op2->kind != CONSTANT || op3->kind != CONSTANT);
-                             if(op2->kind == CONSTANT)
-                                 printf("\taddi $%d, $%d, %d\n",reg_index1,reg_index3,op2->u.value);
-                             else if(op3->kind == CONSTANT){
-                                 printf("\taddi $%d, $%d, %d\n",reg_index1,reg_index2,op3->u.value);
+                             if(op2->kind == CONSTANT){
+                                 if(op3->kind != ADDR)
+                                     printf("\taddi $%d, $%d, %d\n",reg_index1,reg_index3,op2->u.value);
+                                 else{
+                                     printf("\tla $26, %d($sp)\n",var_descriptor[op3->u.value].offset);
+                                     printf("\taddi $%d, $26, %d\n",reg_index1,op2->u.value);
+                                 }
                              }
-                             else
-                                 printf("\tadd $%d, $%d, $%d\n",reg_index1,reg_index2,reg_index3);
+                             else if(op3->kind == CONSTANT){
+                                 if(op2->kind != ADDR)
+                                     printf("\taddi $%d, $%d, %d\n",reg_index1,reg_index2,op3->u.value);
+                                 else{
+                                     printf("\tla $26, %d($sp)\n",var_descriptor[op2->u.value].offset);
+                                     printf("\taddi $%d, $26, %d\n",reg_index1,op3->u.value);
+                                 }
+                             }
+                             else{
+                                 if(op2->kind == ADDR){
+                                     printf("\tla $26, %d($sp)\n",var_descriptor[op2->u.value].offset);
+                                     printf("\tadd $%d, $26, $%d\n",reg_index1,reg_index3);
+                                 }
+                                 else if(op3->kind == ADDR){
+                                     printf("\tla $26, %d($sp)\n",var_descriptor[op2->u.value].offset);
+                                     printf("\tadd $%d, $%d, $26\n",reg_index1,reg_index2);
+                                 }
+                                 else
+                                     printf("\tadd $%d, $%d, $%d\n",reg_index1,reg_index2,reg_index3);
+                             }
                              break;
                          }
                 case 15: {
@@ -437,7 +618,7 @@ void generate_objCode(){
                                  printf("\tmul $%d, $%d, $25\n",reg_index1,reg_index2);
                              }
                              else
-                                 printf("\tdiv $%d, $%d, $%d\n",reg_index1,reg_index2,reg_index3);
+                                 printf("\tmul $%d, $%d, $%d\n",reg_index1,reg_index2,reg_index3);
                              break;
                          }
                 case 17: {
@@ -468,6 +649,14 @@ void generate_objCode(){
             char relop[6][5] = {"==","!=","<",">","<=",">="};
             char instruction[6][5] = {"beq","bne","blt","bgt","ble","bge"};
             assert(code->u.if_goto.relop >= 0 && code->u.if_goto.relop < 6);
+            if(op1->kind == CONSTANT){
+                printf("\tli $25, %d\n",op1->u.value);
+                reg_index1 = 25;
+            }
+            if(op2->kind == CONSTANT){
+                printf("\tli $26, %d\n",op2->u.value);
+                reg_index2 = 26;
+            }
             printf("\t%s $%d, $%d, label%d\n",instruction[code->u.if_goto.relop],
                                               reg_index1,reg_index2,op3->u.value);    
         }

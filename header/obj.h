@@ -6,6 +6,7 @@
 
 
 #define STACK_SIZE 1024
+#define MAX_STACK_DEPTH 10
 
 extern int *basic_block;
 extern int reg_state[32];
